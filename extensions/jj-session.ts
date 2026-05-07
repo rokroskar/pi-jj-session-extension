@@ -20,11 +20,15 @@ let checkpoints = new Map<string, JjCheckpoint>();
 let jjEnabled = false;
 let autoRestore = true;
 let pendingContent: string | undefined;
+let lastStateId: string | undefined;
+
+const STATUS_KEY = "jj-session";
 
 export default function (pi: ExtensionAPI) {
   const cwd = (ctx?: any) => ctx?.cwd ?? process.cwd();
 
   const settingsPathFor = (ctx?: any) => path.join(cwd(ctx), ".pi", "settings.json");
+  const checkpointsPathFor = (ctx?: any) => path.join(cwd(ctx), ".pi", "jj-session-checkpoints.json");
 
   try {
     const settingsPath = settingsPathFor();
@@ -37,6 +41,12 @@ export default function (pi: ExtensionAPI) {
 
   const notify = (ctx: any, message: string, type: "info" | "success" | "warning" | "error" = "info") => {
     if (ctx?.hasUI) ctx.ui.notify(message, type);
+  };
+
+  const setStatus = (ctx: any, text?: string, tone: "accent" | "dim" | "warning" = "dim") => {
+    if (!ctx?.hasUI) return;
+    const styled = text && ctx.ui.theme?.fg ? ctx.ui.theme.fg(tone, text) : text;
+    ctx.ui.setStatus?.(STATUS_KEY, styled);
   };
 
   const saveEnabledSetting = (ctx: any, enabled: boolean) => {
@@ -56,6 +66,28 @@ export default function (pi: ExtensionAPI) {
     return `${label} failed${output ? `: ${output.slice(0, 300)}` : ""}`;
   };
 
+  const loadCheckpoints = (ctx: any) => {
+    try {
+      const file = checkpointsPathFor(ctx);
+      if (!fs.existsSync(file)) return;
+      const data = JSON.parse(fs.readFileSync(file, "utf8"));
+      checkpoints = new Map(Object.entries(data.checkpoints ?? {}) as [string, JjCheckpoint][]);
+      lastStateId = data.lastStateId;
+    } catch {
+      // In-memory checkpoints still work if persistence cannot be read.
+    }
+  };
+
+  const saveCheckpoints = (ctx: any) => {
+    try {
+      const file = checkpointsPathFor(ctx);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, `${JSON.stringify({ lastStateId, checkpoints: Object.fromEntries(checkpoints) }, null, 2)}\n`);
+    } catch {
+      // Non-fatal.
+    }
+  };
+
   const detectJj = async (ctx: any): Promise<boolean> => {
     try {
       const { code } = await pi.exec("jj", ["status"], { cwd: cwd(ctx) });
@@ -70,6 +102,22 @@ export default function (pi: ExtensionAPI) {
     if (code !== 0) return false;
     const text = stdout.trim();
     return !!text && !/working copy (is )?clean/i.test(text);
+  };
+
+  const currentChangeId = async (ctx: any) => {
+    const { stdout, code } = await pi.exec("jj", ["log", "-r", "@", "--no-graph", "-T", "change_id.short()"], { cwd: cwd(ctx) });
+    if (code !== 0) return undefined;
+    return stdout.trim().split(/\s+/)[0];
+  };
+
+  const refreshStatus = async (ctx: any) => {
+    if (!ctx?.hasUI) return;
+    if (!jjEnabled) return setStatus(ctx, "jj off", "dim");
+    if (!(await detectJj(ctx))) return setStatus(ctx, "jj · not initialized", "warning");
+    const [changeId, dirty] = await Promise.all([currentChangeId(ctx), hasChanges(ctx)]);
+    const stateId = lastStateId ?? changeId;
+    const shortId = stateId?.slice(0, 8) ?? "unknown";
+    setStatus(ctx, dirty ? `jj chg ${shortId} ±` : `jj chg ${shortId} ✓`, dirty ? "warning" : "accent");
   };
 
   const commitChanges = async (ctx: any, message: string) => {
@@ -132,6 +180,9 @@ export default function (pi: ExtensionAPI) {
     if (!(await ensureJjRepo(ctx))) return;
     try {
       await pi.exec("jj", ["new", checkpoint.commitId], { cwd: cwd(ctx) });
+      lastStateId = checkpoint.commitId;
+      saveCheckpoints(ctx);
+      await refreshStatus(ctx);
       notify(ctx, `Restored files: ${checkpoint.description}`, "success");
     } catch (err: any) {
       notify(ctx, `Restore failed: ${err?.message ?? err}`, "error");
@@ -144,6 +195,7 @@ export default function (pi: ExtensionAPI) {
   };
 
   const findCheckpointForEntry = (ctx: any, entryId?: string): JjCheckpoint | undefined => {
+    loadCheckpoints(ctx);
     if (entryId && checkpoints.has(entryId)) return checkpoints.get(entryId);
 
     let cur = entryId;
@@ -163,6 +215,11 @@ export default function (pi: ExtensionAPI) {
     return undefined;
   };
 
+  pi.on("session_start", async (_event, ctx) => {
+    loadCheckpoints(ctx);
+    await refreshStatus(ctx);
+  });
+
   pi.on("message_start", (event: any) => {
     if (!jjEnabled || event.message?.role !== "user") return;
     const content = event.message.content;
@@ -173,7 +230,10 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("turn_end", async (_event, ctx) => {
-    if (!jjEnabled) return;
+    if (!jjEnabled) {
+      setStatus(ctx, "jj off", "dim");
+      return;
+    }
     const content = pendingContent;
     pendingContent = undefined;
 
@@ -188,15 +248,19 @@ export default function (pi: ExtensionAPI) {
       const commitId = await commitChanges(ctx, description);
       if (!commitId) return;
 
+      lastStateId = commitId;
       const checkpoint = { entryId, commitId, description, timestamp: Date.now() };
       checkpoints.set(entryId, checkpoint);
 
       const userEntryId = latestUserEntryId(ctx);
       if (userEntryId && userEntryId !== entryId) checkpoints.set(userEntryId, { ...checkpoint, entryId: userEntryId });
+      saveCheckpoints(ctx);
 
-      notify(ctx, `JJ checkpoint: ${description.replace(/^pi session: /, "").slice(0, 48)}`, "info");
+      notify(ctx, `JJ checkpoint chg ${commitId.slice(0, 8)}: ${description.replace(/^pi session: /, "").slice(0, 48)}`, "info");
     } catch (err: any) {
       notify(ctx, `JJ checkpoint failed: ${err?.message ?? err}`, "warning");
+    } finally {
+      await refreshStatus(ctx);
     }
   });
 
@@ -216,6 +280,7 @@ export default function (pi: ExtensionAPI) {
     description: "List jj checkpoints for this pi runtime",
     handler: async (_args, ctx) => {
       if (!jjEnabled) return notify(ctx, "JJ Session extension is disabled", "info");
+      loadCheckpoints(ctx);
       if (checkpoints.size === 0) return notify(ctx, "No JJ checkpoints yet", "info");
       const unique = [...checkpoints.values()]
         .sort((a, b) => a.timestamp - b.timestamp)
@@ -230,6 +295,7 @@ export default function (pi: ExtensionAPI) {
     description: "Restore files from a checkpoint (entry id or latest)",
     handler: async (args, ctx) => {
       if (!jjEnabled) return notify(ctx, "JJ Session extension is disabled", "info");
+      loadCheckpoints(ctx);
       const requested = args?.trim();
       const checkpoint = requested
         ? checkpoints.get(requested) ?? [...checkpoints.values()].find((c) => c.entryId.startsWith(requested))
@@ -253,6 +319,7 @@ export default function (pi: ExtensionAPI) {
     description: "Initialize jj for this project if needed",
     handler: async (_args, ctx) => {
       const ready = await ensureJjRepo(ctx);
+      await refreshStatus(ctx);
       notify(ctx, ready ? "JJ repository ready" : "JJ repository initialization failed", ready ? "success" : "warning");
     },
   });
@@ -264,8 +331,10 @@ export default function (pi: ExtensionAPI) {
       saveEnabledSetting(ctx, jjEnabled);
       if (jjEnabled) {
         const ready = await ensureJjRepo(ctx);
+        await refreshStatus(ctx);
         notify(ctx, ready ? "JJ Session: enabled" : "JJ Session: enabled, but jj init failed", ready ? "info" : "warning");
       } else {
+        setStatus(ctx, "jj off", "dim");
         notify(ctx, "JJ Session: disabled", "info");
       }
     },

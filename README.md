@@ -11,7 +11,8 @@ When enabled, the extension creates jj checkpoints after pi turns that change fi
 - If an existing Git repo is present, initializes jj on top of that Git repo.
 - If no VCS is present, initializes a non-colocated jj repo (`.jj/` only, no top-level `.git/`).
 - Mirrors pi branching with `jj new <checkpoint>`.
-- Checkpoint state is currently in-memory for the current pi runtime.
+- Shows a compact footer status: `jj off` when disabled, `jj chg abc12345 ✓` when enabled and clean, or `jj chg abc12345 ±` when the working copy has uncheckpointed changes.
+- Persists pi-entry-to-jj checkpoint mappings in `.pi/jj-session-checkpoints.json`, so tree restores survive `/reload` and pi restarts.
 
 ## Requirements
 
@@ -132,7 +133,7 @@ This gives future pi checkpoints a clean starting point.
 |---|---|
 | `/jj-toggle` | Enable/disable the extension and persist the setting |
 | `/jj-init` | Initialize jj for the current project if needed |
-| `/jj-checkpoints` | List checkpoints created in this pi runtime |
+| `/jj-checkpoints` | List saved checkpoints for this project |
 | `/jj-restore [entry-id]` | Restore files from a checkpoint, or latest if omitted |
 | `/jj-sync` | Restore files to the nearest checkpoint on the current pi session path |
 
@@ -142,6 +143,30 @@ Start with the extension enabled:
 
 ```text
 /jj-toggle
+```
+
+When disabled, the footer/status line shows:
+
+```text
+jj off
+```
+
+When enabled, it shows the latest checkpoint/restored state id:
+
+```text
+jj chg mzvwkqpn ✓
+```
+
+If the working copy has uncheckpointed changes, it switches to:
+
+```text
+jj chg mzvwkqpn ±
+```
+
+If jj has not been initialized yet, it shows:
+
+```text
+jj · not initialized
 ```
 
 Then ask pi to make two changes:
@@ -208,7 +233,7 @@ A  notes.txt = "version 1"
 └─ C  notes.txt = "alternate version 2"  <- current
 ```
 
-That is the core idea: moving around pi's session tree also moves your files to the matching point in jj history, so experiments can branch naturally.
+That is the core idea: moving around pi's session tree also moves your files to the matching point in jj history, so experiments can branch naturally. The footer status updates along the way so you can always see which jj change your working copy is on.
 
 If you want to force synchronization after navigation:
 
@@ -344,6 +369,6 @@ Current coverage includes:
 
 ## Limitations
 
-- Checkpoint mappings are kept in memory for the current pi runtime. Restarting pi preserves jj commits but not the pi-entry-to-jj mapping.
+- Checkpoint mappings are stored in `.pi/jj-session-checkpoints.json`. If that file is deleted, jj commits remain, but automatic pi-entry-to-jj restore lookup is lost.
 - The extension uses jj commands under the hood; if a jj command fails due to conflicts or repository issues, resolve with jj and continue.
 - Existing Git repos are supported, but the extension's branch mirroring is jj-first.

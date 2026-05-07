@@ -215,6 +215,24 @@ test('source: restore mirrors branching with jj new', () => {
   excludes('"restore", "--from", checkpoint.commitId');
 });
 
+test('source: persists checkpoints across reloads/restarts', () => {
+  includes('jj-session-checkpoints.json');
+  includes('const loadCheckpoints = (ctx: any) =>');
+  includes('const saveCheckpoints = (ctx: any) =>');
+  includes('saveCheckpoints(ctx);');
+  includes('loadCheckpoints(ctx);');
+});
+
+test('source: shows enabled status and current jj change id in the UI', () => {
+  includes('const STATUS_KEY = "jj-session"');
+  includes('ctx.ui.setStatus?.(STATUS_KEY, styled)');
+  includes('["log", "-r", "@", "--no-graph", "-T", "change_id.short()"]');
+  includes('if (!jjEnabled) return setStatus(ctx, "jj off", "dim")');
+  includes('const stateId = lastStateId ?? changeId');
+  includes('setStatus(ctx, dirty ? `jj chg ${shortId} ±` : `jj chg ${shortId} ✓`, dirty ? "warning" : "accent")');
+  includes('pi.on("session_start"');
+});
+
 // Behavioral model tests
 test('behavior: disabled by default does not checkpoint dirty worktree', async () => {
   const pi = new FakePi({ jjReady: true, dirty: true });
