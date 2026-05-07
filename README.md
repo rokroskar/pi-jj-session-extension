@@ -136,16 +136,79 @@ This gives future pi checkpoints a clean starting point.
 | `/jj-restore [entry-id]` | Restore files from a checkpoint, or latest if omitted |
 | `/jj-sync` | Restore files to the nearest checkpoint on the current pi session path |
 
-## Typical workflow
+## Example: conversation history controls file history
+
+Start with the extension enabled:
 
 ```text
 /jj-toggle
-Create file a.txt with "v1"
-Change a.txt to "v2"
+```
+
+Then ask pi to make two changes:
+
+```text
+You: Create notes.txt containing "version 1"
+pi:  writes notes.txt
+     JJ checkpoint A
+
+You: Change notes.txt to say "version 2"
+pi:  edits notes.txt
+     JJ checkpoint B
+```
+
+At this point your file contains:
+
+```text
+version 2
+```
+
+Your pi session and jj checkpoints line up like this:
+
+```text
+pi session history              file state
+
+A  Create notes.txt        -->  notes.txt = "version 1"
+│
+B  Change to version 2     -->  notes.txt = "version 2"   <- current
+```
+
+Now open pi's tree:
+
+```text
 /tree
 ```
 
-Select the earlier pi session point. The extension should restore files by creating a new jj branch from the matching checkpoint.
+Select the earlier `Create notes.txt` turn. The extension restores the matching jj checkpoint by creating a new jj child from checkpoint `A`:
+
+```text
+pi session history              jj/file history
+
+A  Create notes.txt        -->  A: notes.txt = "version 1"  <- restored
+│                              ├─ B: notes.txt = "version 2"
+B  Change to version 2         └─ @: new working branch from A
+```
+
+Your working file is back to:
+
+```text
+version 1
+```
+
+If you now ask pi to try something different:
+
+```text
+You: Change notes.txt to say "alternate version 2"
+```
+
+jj records a real branch:
+
+```text
+A  notes.txt = "version 1"
+├─ B  notes.txt = "version 2"
+└─ C  notes.txt = "alternate version 2"  <- current
+```
+
+That is the core idea: moving around pi's session tree also moves your files to the matching point in jj history, so experiments can branch naturally.
 
 If you want to force synchronization after navigation:
 
@@ -284,16 +347,3 @@ Current coverage includes:
 - Checkpoint mappings are kept in memory for the current pi runtime. Restarting pi preserves jj commits but not the pi-entry-to-jj mapping.
 - The extension uses jj commands under the hood; if a jj command fails due to conflicts or repository issues, resolve with jj and continue.
 - Existing Git repos are supported, but the extension's branch mirroring is jj-first.
-
-## Files
-
-Important files:
-
-```text
-extensions/jj-session.ts       # packaged extension implementation
-.pi/extensions/jj-session.ts   # local dev shim for this checkout
-tests/jj-session.spec.js       # dependency-free test suite
-package.json                   # pi package manifest
-README.md                      # this documentation
-LICENSE                        # MIT license
-```
