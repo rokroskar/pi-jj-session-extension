@@ -33,7 +33,7 @@ This repo is packaged as a pi package. The extension entry point is declared in 
 }
 ```
 
-### Local install while developing
+### Local development
 
 From another project, install this checkout globally:
 
@@ -55,22 +55,22 @@ pi -e /absolute/path/to/pi-jj-session-extension
 
 ### Git install
 
-After pushing this repo to GitHub or another Git host:
+Installing from GitHub:
 
 ```bash
-pi install git:github.com/you/pi-jj-session-extension
+pi install git:github.com/rokroskar/pi-jj-session-extension
 ```
 
 Pinned tag/version:
 
 ```bash
-pi install git:github.com/you/pi-jj-session-extension@v1.0.0
+pi install git:github.com/rokroskar/pi-jj-session-extension@v1.0.0
 ```
 
 Project-local team install:
 
 ```bash
-pi install -l git:github.com/you/pi-jj-session-extension@v1.0.0
+pi install -l git:github.com/rokroskar/pi-jj-session-extension@v1.0.0
 ```
 
 Then restart pi or run:
