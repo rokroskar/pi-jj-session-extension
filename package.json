@@ -1,0 +1,36 @@
+{
+  "name": "pi-jj-session-extension",
+  "version": "1.0.0",
+  "description": "Pi extension that mirrors pi session history with jj checkpoints and branches",
+  "main": "extensions/jj-session.ts",
+  "scripts": {
+    "test": "node tests/jj-session.spec.js",
+    "check": "node --check extensions/jj-session.ts && node tests/jj-session.spec.js"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "jj",
+    "jujutsu",
+    "extension",
+    "version-control",
+    "checkpoint",
+    "session-tree"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": [
+      "extensions/jj-session.ts"
+    ]
+  },
+  "files": [
+    "extensions/",
+    "tests/",
+    "README.md",
+    "LICENSE",
+    "package.json"
+  ]
+}

@@ -1,0 +1,11 @@
+# Local pi state/shims; package entry point is extensions/jj-session.ts
+.pi/
+
+# Package/runtime scratch
+node_modules/
+.npm-cache/
+*.tgz
+
+# OS files
+.DS_Store
+Thumbs.db
