@@ -193,6 +193,8 @@ test('source: extension is off by default and has expected commands', () => {
   includes('pi.registerCommand("jj-init"');
   includes('pi.registerCommand("jj-checkpoints"');
   includes('pi.registerCommand("jj-restore"');
+  includes('pi.registerCommand("jj-describe"');
+  includes('pi.registerCommand("jj-forget-checkpoints"');
   includes('pi.registerCommand("jj-sync"');
   excludes('pi.registerCommand("jj-doctor"');
 });
@@ -221,6 +223,13 @@ test('source: persists checkpoints across reloads/restarts', () => {
   includes('const saveCheckpoints = (ctx: any) =>');
   includes('saveCheckpoints(ctx);');
   includes('loadCheckpoints(ctx);');
+});
+
+test('source: exposes safe cleanup commands for checkpoint history', () => {
+  includes('pi.registerCommand("jj-describe"');
+  includes('pi.exec("jj", ["describe", "-r", checkpoint.commitId, "-m", message]');
+  includes('pi.registerCommand("jj-forget-checkpoints"');
+  includes('fs.rmSync(checkpointsPathFor(ctx), { force: true })');
 });
 
 test('source: shows enabled status and current jj change id in the UI', () => {

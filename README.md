@@ -134,7 +134,10 @@ This gives future pi checkpoints a clean starting point.
 | `/jj-toggle` | Enable/disable the extension and persist the setting |
 | `/jj-init` | Initialize jj for the current project if needed |
 | `/jj-checkpoints` | List saved checkpoints for this project |
-| `/jj-restore [entry-id]` | Restore files from a checkpoint, or latest if omitted |
+| `/jj-restore [entry-id-or-change-id]` | Restore files from a checkpoint, or latest if omitted |
+| `/jj-describe <message>` | Rename/describe the latest checkpoint change |
+| `/jj-describe -r <entry-id-or-change-id> <message>` | Rename/describe a specific checkpoint change |
+| `/jj-forget-checkpoints` | Clear pi restore mappings without deleting jj history |
 | `/jj-sync` | Restore files to the nearest checkpoint on the current pi session path |
 
 ## Example: conversation history controls file history
@@ -279,9 +282,33 @@ jj:  A ─ B ─ C
           └ D
 ```
 
-## Eventually making real commits
+## Keeping history sane
 
 The extension's commits are exploration checkpoints. Later, clean them up into meaningful commits with normal jj workflows.
+
+Important: commands that squash, abandon, or rewrite jj history can break old pi tree restores. Tree navigation depends on `.pi/jj-session-checkpoints.json` mapping pi entries to jj change ids. If those jj changes are removed or rewritten away, intermediate file states may no longer be restorable.
+
+Safe extension commands:
+
+```text
+/jj-describe Implement feature X
+```
+
+Describes the latest checkpoint change. This is equivalent to a targeted `jj describe -r <latest-checkpoint> -m ...`.
+
+```text
+/jj-describe -r abc123 Implement feature X
+```
+
+Describes a specific checkpoint by pi entry prefix or jj change id prefix.
+
+```text
+/jj-forget-checkpoints
+```
+
+Clears the pi-entry-to-jj restore mappings without deleting jj history. Use this after you decide you no longer need old pi tree entries to restore intermediate file states.
+
+Normal jj cleanup commands:
 
 Inspect history:
 
@@ -327,8 +354,31 @@ Recommended cleanup flow:
 ```bash
 jj log
 jj diff -r <interesting-rev>
-jj describe -r <interesting-rev> -m "Meaningful commit message"
-# optionally squash/abandon exploratory checkpoints
+```
+
+Then from pi, describe the useful checkpoint:
+
+```text
+/jj-describe -r <interesting-rev> Meaningful commit message
+```
+
+Optionally squash/abandon exploratory checkpoints with jj once you no longer need tree restore for those intermediate states:
+
+```bash
+jj squash -r <checkpoint> --into <target>
+# or
+jj abandon <checkpoint>
+```
+
+Then clear stale restore mappings:
+
+```text
+/jj-forget-checkpoints
+```
+
+Finally publish/move bookmarks if desired:
+
+```bash
 jj bookmark set my-feature -r <final-rev>
 jj git push --bookmark my-feature
 ```

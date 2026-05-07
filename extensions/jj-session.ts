@@ -194,6 +194,16 @@ export default function (pi: ExtensionAPI) {
     return [...entries].reverse().find((e: any) => e?.type === "message" && e.message?.role === "user")?.id;
   };
 
+  const latestCheckpoint = () => [...checkpoints.values()].sort((a, b) => b.timestamp - a.timestamp)[0];
+
+  const resolveCheckpoint = (ctx: any, selector?: string): JjCheckpoint | undefined => {
+    loadCheckpoints(ctx);
+    const query = selector?.trim();
+    if (!query) return latestCheckpoint();
+    return checkpoints.get(query)
+      ?? [...checkpoints.values()].find((c) => c.entryId.startsWith(query) || c.commitId.startsWith(query));
+  };
+
   const findCheckpointForEntry = (ctx: any, entryId?: string): JjCheckpoint | undefined => {
     loadCheckpoints(ctx);
     if (entryId && checkpoints.has(entryId)) return checkpoints.get(entryId);
@@ -213,6 +223,18 @@ export default function (pi: ExtensionAPI) {
       if (id && checkpoints.has(id)) return checkpoints.get(id);
     }
     return undefined;
+  };
+
+  const parseDescribeArgs = (args?: string) => {
+    const text = args?.trim() ?? "";
+    if (!text) return { message: "" };
+    const delimiter = text.indexOf(" -- ");
+    if (delimiter >= 0) {
+      return { selector: text.slice(0, delimiter).trim(), message: text.slice(delimiter + 4).trim() };
+    }
+    const revMatch = text.match(/^-r\s+(\S+)\s+(.+)$/s);
+    if (revMatch) return { selector: revMatch[1], message: revMatch[2].trim() };
+    return { message: text };
   };
 
   pi.on("session_start", async (_event, ctx) => {
@@ -292,16 +314,59 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("jj-restore", {
-    description: "Restore files from a checkpoint (entry id or latest)",
+    description: "Restore files from a checkpoint (entry id/change id or latest)",
     handler: async (args, ctx) => {
       if (!jjEnabled) return notify(ctx, "JJ Session extension is disabled", "info");
-      loadCheckpoints(ctx);
-      const requested = args?.trim();
-      const checkpoint = requested
-        ? checkpoints.get(requested) ?? [...checkpoints.values()].find((c) => c.entryId.startsWith(requested))
-        : [...checkpoints.values()].sort((a, b) => b.timestamp - a.timestamp)[0];
+      const checkpoint = resolveCheckpoint(ctx, args);
       if (!checkpoint) return notify(ctx, "No matching JJ checkpoint", "error");
       await restoreCheckpoint(checkpoint, ctx);
+    },
+  });
+
+  pi.registerCommand("jj-describe", {
+    description: "Describe a checkpoint change: /jj-describe [-r id] message",
+    handler: async (args, ctx) => {
+      if (!jjEnabled) return notify(ctx, "JJ Session extension is disabled", "info");
+      if (!(await ensureJjRepo(ctx))) return;
+      const { selector, message } = parseDescribeArgs(args);
+      if (!message) return notify(ctx, "Usage: /jj-describe [-r entry-or-change] <message>", "info");
+      const checkpoint = resolveCheckpoint(ctx, selector);
+      if (!checkpoint) return notify(ctx, "No matching JJ checkpoint", "error");
+
+      const result = await pi.exec("jj", ["describe", "-r", checkpoint.commitId, "-m", message], { cwd: cwd(ctx) });
+      if (result.code !== 0) return notify(ctx, formatExecFailure("jj describe", result), "warning");
+
+      const updated = { ...checkpoint, description: message };
+      for (const [id, existing] of checkpoints.entries()) {
+        if (existing.commitId === checkpoint.commitId) checkpoints.set(id, { ...updated, entryId: id });
+      }
+      saveCheckpoints(ctx);
+      await refreshStatus(ctx);
+      notify(ctx, `Described jj chg ${checkpoint.commitId.slice(0, 8)}: ${message.slice(0, 60)}`, "success");
+    },
+  });
+
+  pi.registerCommand("jj-forget-checkpoints", {
+    description: "Forget pi-to-jj restore mappings without changing jj history",
+    handler: async (args, ctx) => {
+      if (!jjEnabled) return notify(ctx, "JJ Session extension is disabled", "info");
+      const force = /(^|\s)--yes(\s|$)/.test(args ?? "");
+      if (!force && ctx?.hasUI && ctx.ui.confirm) {
+        const ok = await ctx.ui.confirm(
+          "Forget JJ checkpoints?",
+          "This clears pi tree restore mappings, but does not delete jj commits. Old tree entries may no longer restore file states."
+        );
+        if (!ok) return notify(ctx, "Kept JJ checkpoints", "info");
+      }
+      checkpoints.clear();
+      lastStateId = undefined;
+      try {
+        fs.rmSync(checkpointsPathFor(ctx), { force: true });
+      } catch {
+        // Non-fatal.
+      }
+      await refreshStatus(ctx);
+      notify(ctx, "Forgot JJ checkpoint mappings", "success");
     },
   });
 
