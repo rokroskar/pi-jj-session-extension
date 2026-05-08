@@ -62,7 +62,7 @@ class FakePi {
 
     if (cmd === 'jj' && args[0] === 'status') {
       return this.jjReady
-        ? { code: 0, stdout: this.dirty ? 'Modified files:\nM file.txt\n' : 'The working copy is clean\n', stderr: '' }
+        ? { code: 0, stdout: this.dirty ? 'Modified files:\nM file.txt\n' : 'The working copy has no changes.\n', stderr: '' }
         : { code: 1, stdout: '', stderr: 'No jj repo' };
     }
 
@@ -108,14 +108,13 @@ class FakePi {
 function makeModel({ pi, ctx, settingsEnabled = false, autoRestore = true }) {
   const checkpoints = new Map();
   let enabled = settingsEnabled;
-  let pendingContent;
 
   const cwd = () => ctx.cwd;
   const detectJj = async () => (await pi.exec('jj', ['status'], { cwd: cwd() })).code === 0;
   const hasChanges = async () => {
     const { code, stdout } = await pi.exec('jj', ['status'], { cwd: cwd() });
     if (code !== 0) return false;
-    return stdout.trim() && !/working copy (is )?clean/i.test(stdout.trim());
+    return stdout.trim() && !/(working copy (is )?clean|working copy has no changes)/i.test(stdout.trim());
   };
   const commitChanges = async (message) => {
     await pi.exec('jj', ['commit', '-m', message], { cwd: cwd() });
@@ -158,15 +157,13 @@ function makeModel({ pi, ctx, settingsEnabled = false, autoRestore = true }) {
     checkpoints,
     get enabled() { return enabled; },
     async toggle() { enabled = !enabled; if (enabled) await ensureJjRepo(); return enabled; },
-    messageStart(text) { if (enabled) pendingContent = text.trim().split('\n')[0].slice(0, 60); },
+    messageStart(_text) {},
     async turnEnd() {
       if (!enabled) return;
-      const content = pendingContent;
-      pendingContent = undefined;
       if (!(await ensureJjRepo())) return;
       if (!(await hasChanges())) return;
       const entryId = ctx.sessionManager.getLeafEntry()?.id;
-      const description = content ? `pi session: ${content}` : `pi session: ${entryId.slice(0, 8)}`;
+      const description = `pi checkpoint ${entryId.slice(0, 8)}`;
       const commitId = await commitChanges(description);
       const checkpoint = { entryId, commitId, description, timestamp: Date.now() };
       checkpoints.set(entryId, checkpoint);
@@ -194,6 +191,7 @@ test('source: extension is off by default and has expected commands', () => {
   includes('pi.registerCommand("jj-checkpoints"');
   includes('pi.registerCommand("jj-restore"');
   includes('pi.registerCommand("jj-describe"');
+  includes('pi.registerCommand("jj-compact"');
   includes('pi.registerCommand("jj-forget-checkpoints"');
   includes('pi.registerCommand("jj-sync"');
   excludes('pi.registerCommand("jj-doctor"');
@@ -217,19 +215,58 @@ test('source: restore mirrors branching with jj new', () => {
   excludes('"restore", "--from", checkpoint.commitId');
 });
 
+test('source: recognizes jj clean status wording', () => {
+  includes('(working copy (is )?clean|working copy has no changes)');
+});
+
+test('source: automatic checkpoint messages do not include prompt text', () => {
+  includes('const description = `pi checkpoint ${entryId.slice(0, 8)}`');
+  excludes('pi.on("message_start"');
+  excludes('pendingContent');
+});
+
 test('source: persists checkpoints across reloads/restarts', () => {
-  includes('jj-session-checkpoints.json');
+  includes('.jj", "pi-session-checkpoints.json"');
+  includes('.pi", "jj-session-checkpoints.json"');
   includes('const loadCheckpoints = (ctx: any) =>');
   includes('const saveCheckpoints = (ctx: any) =>');
   includes('saveCheckpoints(ctx);');
   includes('loadCheckpoints(ctx);');
 });
 
+test('source: checkpoints command renders through the UI, not raw console output', () => {
+  includes('ctx.ui.select(`JJ checkpoints (${rows.length})`');
+  includes('const action = await ctx.ui.select(`JJ ${checkpoint.commitId.slice(0, 8)}`');
+  includes('const message = await ctx.ui.input?.("Describe checkpoint"');
+  includes('await restoreCheckpoint(checkpoint, ctx)');
+  excludes('console.log');
+});
+
+test('source: warns when a pi point cannot restore because it was compacted', () => {
+  includes('compactedCheckpoints = new Map');
+  includes('const notifyCompactedIfNeeded = (ctx: any, entryId?: string) =>');
+  includes('Cannot restore this pi point: its JJ checkpoint was compacted');
+  includes('compactedCheckpoints.set(id, { ...checkpoint })');
+});
+
+test('source: gracefully handles stale checkpoint mappings', () => {
+  includes('const revisionExists = async (ctx: any, revision: string) =>');
+  includes('const markCheckpointMissing = (ctx: any, checkpoint: JjCheckpoint) =>');
+  includes('const pruneMissingCheckpoints = async (ctx: any) =>');
+  includes('await pruneMissingCheckpoints(ctx)');
+  includes('Cannot describe this checkpoint: jj chg');
+  includes('Cannot restore this checkpoint: jj chg');
+});
+
 test('source: exposes safe cleanup commands for checkpoint history', () => {
   includes('pi.registerCommand("jj-describe"');
   includes('pi.exec("jj", ["describe", "-r", checkpoint.commitId, "-m", message]');
+  includes('pi.registerCommand("jj-compact"');
+  includes('Cannot compact while the jj working copy has uncheckpointed changes');
+  includes('pi.exec("jj", ["abandon", "--restore-descendants", ...discard.map((checkpoint) => checkpoint.commitId)]');
   includes('pi.registerCommand("jj-forget-checkpoints"');
   includes('fs.rmSync(checkpointsPathFor(ctx), { force: true })');
+  includes('fs.rmSync(legacyCheckpointsPathFor(ctx), { force: true })');
 });
 
 test('source: shows enabled status and current jj change id in the UI', () => {
@@ -326,7 +363,7 @@ test('behavior: turn end commits dirty worktree and stores checkpoint under leaf
   const model = makeModel({ pi, ctx, settingsEnabled: true });
   model.messageStart('Create file a.txt with v1');
   await model.turnEnd();
-  assert.strictEqual(pi.lastCommitMessage, 'pi session: Create file a.txt with v1');
+  assert.strictEqual(pi.lastCommitMessage, 'pi checkpoint leaf1');
   assert(model.checkpoints.has('leaf1'));
   assert(model.checkpoints.has('user1'));
 });

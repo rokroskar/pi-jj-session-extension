@@ -12,7 +12,7 @@ When enabled, the extension creates jj checkpoints after pi turns that change fi
 - If no VCS is present, initializes a non-colocated jj repo (`.jj/` only, no top-level `.git/`).
 - Mirrors pi branching with `jj new <checkpoint>`.
 - Shows a compact footer status: `jj off` when disabled, `jj chg abc12345 ✓` when enabled and clean, or `jj chg abc12345 ±` when the working copy has uncheckpointed changes.
-- Persists pi-entry-to-jj checkpoint mappings in `.pi/jj-session-checkpoints.json`, so tree restores survive `/reload` and pi restarts.
+- Persists pi-entry-to-jj checkpoint mappings in `.jj/pi-session-checkpoints.json`, so tree restores survive `/reload` and pi restarts without dirtying the working copy.
 
 ## Requirements
 
@@ -34,50 +34,50 @@ This repo is packaged as a pi package. The extension entry point is declared in 
 }
 ```
 
-### Local development
-
-From another project, install this checkout globally:
-
-```bash
-pi install /absolute/path/to/pi-jj-session-extension
-```
-
-Or install it into the current project's `.pi/settings.json`:
-
-```bash
-pi install -l /absolute/path/to/pi-jj-session-extension
-```
-
-For one-off testing without installing:
-
-```bash
-pi -e /absolute/path/to/pi-jj-session-extension
-```
-
 ### Git install
 
-Installing from GitHub:
+Install globally for all projects:
 
 ```bash
-pi install git:github.com/rokroskar/pi-jj-session-extension
+pi install https://github.com/rokroskar/pi-jj-session-extension
 ```
 
-Pinned tag/version:
+Install into the current project's `.pi/settings.json`:
 
 ```bash
-pi install git:github.com/rokroskar/pi-jj-session-extension@v1.0.0
+pi install -l https://github.com/rokroskar/pi-jj-session-extension
 ```
 
-Project-local team install:
+Use a pinned tag/version for reproducible project installs:
 
 ```bash
-pi install -l git:github.com/rokroskar/pi-jj-session-extension@v1.0.0
+pi install -l https://github.com/rokroskar/pi-jj-session-extension@v1.0.0
 ```
 
 Then restart pi or run:
 
 ```text
 /reload
+```
+
+### Local checkout install
+
+For local development or testing, install from a checked-out copy:
+
+```bash
+pi install /absolute/path/to/pi-jj-session-extension
+```
+
+Project-local local install:
+
+```bash
+pi install -l /absolute/path/to/pi-jj-session-extension
+```
+
+One-off testing without installing:
+
+```bash
+pi -e /absolute/path/to/pi-jj-session-extension
 ```
 
 ## Enabling
@@ -117,7 +117,7 @@ When the extension is enabled, it ensures a jj repo exists:
 | Existing Git repo, no jj | `jj git init --git-repo <git-dir> <root>` |
 | No VCS | `jj git init --no-colocate <cwd>` |
 
-Your installed jj version does not support a native `jj init`. For projects without VCS, the extension uses `jj git init --no-colocate`, which creates a `.jj/` directory with the Git backing store hidden inside `.jj/`. It does **not** create a top-level `.git/`.
+Some jj versions do not support a native `jj init`. For projects without VCS, the extension uses `jj git init --no-colocate`, which creates a `.jj/` directory with the Git backing store hidden inside `.jj/`. It does **not** create a top-level `.git/`.
 
 If the project already has files when jj is initialized, the extension creates a quiet baseline commit:
 
@@ -133,10 +133,11 @@ This gives future pi checkpoints a clean starting point.
 |---|---|
 | `/jj-toggle` | Enable/disable the extension and persist the setting |
 | `/jj-init` | Initialize jj for the current project if needed |
-| `/jj-checkpoints` | List saved checkpoints for this project |
+| `/jj-checkpoints` | Open an interactive checkpoint viewer; select a checkpoint to describe or restore it |
 | `/jj-restore [entry-id-or-change-id]` | Restore files from a checkpoint, or latest if omitted |
-| `/jj-describe <message>` | Rename/describe the latest checkpoint change |
-| `/jj-describe -r <entry-id-or-change-id> <message>` | Rename/describe a specific checkpoint change |
+| `/jj-describe <message>` | Rename/describe the latest checkpoint change and mark it as worth keeping |
+| `/jj-describe -r <entry-id-or-change-id> <message>` | Rename/describe a specific checkpoint change and mark it as worth keeping |
+| `/jj-compact` | Abandon unnamed checkpoint changes and keep only `/jj-describe` checkpoints |
 | `/jj-forget-checkpoints` | Clear pi restore mappings without deleting jj history |
 | `/jj-sync` | Restore files to the nearest checkpoint on the current pi session path |
 
@@ -177,12 +178,14 @@ Then ask pi to make two changes:
 ```text
 You: Create notes.txt containing "version 1"
 pi:  writes notes.txt
-     JJ checkpoint A
+     JJ checkpoint A  (generic commit message: "pi checkpoint ...")
 
 You: Change notes.txt to say "version 2"
 pi:  edits notes.txt
-     JJ checkpoint B
+     JJ checkpoint B  (generic commit message: "pi checkpoint ...")
 ```
+
+Automatic checkpoint messages intentionally do **not** include your prompts. If a checkpoint is useful, name it explicitly with `/jj-describe`.
 
 At this point your file contains:
 
@@ -257,7 +260,7 @@ You should see branching corresponding to pi branching after you navigate back a
 For each file-changing pi turn:
 
 1. pi changes files.
-2. The extension runs `jj commit -m "pi session: ..."`.
+2. The extension runs `jj commit -m "pi checkpoint <entry>"`. The prompt text is not stored in jj history.
 3. It stores the produced jj change id as a checkpoint.
 
 When you navigate back in pi:
@@ -286,7 +289,7 @@ jj:  A ─ B ─ C
 
 The extension's commits are exploration checkpoints. Later, clean them up into meaningful commits with normal jj workflows.
 
-Important: commands that squash, abandon, or rewrite jj history can break old pi tree restores. Tree navigation depends on `.pi/jj-session-checkpoints.json` mapping pi entries to jj change ids. If those jj changes are removed or rewritten away, intermediate file states may no longer be restorable.
+Important: commands that squash, abandon, or rewrite jj history can break old pi tree restores. Tree navigation depends on `.jj/pi-session-checkpoints.json` mapping pi entries to jj change ids. If those jj changes are removed or rewritten away, intermediate file states may no longer be restorable.
 
 Safe extension commands:
 
@@ -294,7 +297,7 @@ Safe extension commands:
 /jj-describe Implement feature X
 ```
 
-Describes the latest checkpoint change. This is equivalent to a targeted `jj describe -r <latest-checkpoint> -m ...`.
+Describes the latest checkpoint change and marks it with `★` in `/jj-checkpoints`. This is equivalent to a targeted `jj describe -r <latest-checkpoint> -m ...`.
 
 ```text
 /jj-describe -r abc123 Implement feature X
@@ -303,10 +306,16 @@ Describes the latest checkpoint change. This is equivalent to a targeted `jj des
 Describes a specific checkpoint by pi entry prefix or jj change id prefix.
 
 ```text
+/jj-compact
+```
+
+Keeps only checkpoints that were named with `/jj-describe` and runs `jj abandon --restore-descendants` on the unnamed checkpoint changes. This removes intermediate checkpoint nodes while preserving the content of descendant/named checkpoints. After this, old intermediate pi tree entries are intentionally no longer restorable; only the named checkpoints remain in the extension's restore map. If you navigate to, restore, or describe a compacted/stale checkpoint, the extension warns you instead of surfacing raw jj errors.
+
+```text
 /jj-forget-checkpoints
 ```
 
-Clears the pi-entry-to-jj restore mappings without deleting jj history. Use this after you decide you no longer need old pi tree entries to restore intermediate file states.
+Clears the pi-entry-to-jj restore mappings without deleting jj history. Use this after manual jj cleanup if you no longer need old pi tree entries to restore intermediate file states.
 
 Normal jj cleanup commands:
 
@@ -370,10 +379,10 @@ jj squash -r <checkpoint> --into <target>
 jj abandon <checkpoint>
 ```
 
-Then clear stale restore mappings:
+Or let the extension compact to named checkpoints and clear intermediate restore mappings:
 
 ```text
-/jj-forget-checkpoints
+/jj-compact
 ```
 
 Finally publish/move bookmarks if desired:
@@ -414,11 +423,14 @@ Current coverage includes:
 - baseline commit behavior
 - checkpoint creation
 - checkpoint aliasing for leaf and user prompt entries
+- persisted checkpoint mappings
+- interactive checkpoint viewer
+- `/jj-describe`, `/jj-compact`, and stale-checkpoint handling
 - jj branch mirroring with `jj new <checkpoint>`
 - ancestor checkpoint lookup
 
 ## Limitations
 
-- Checkpoint mappings are stored in `.pi/jj-session-checkpoints.json`. If that file is deleted, jj commits remain, but automatic pi-entry-to-jj restore lookup is lost.
+- Checkpoint mappings are stored in `.jj/pi-session-checkpoints.json`. Legacy `.pi/jj-session-checkpoints.json` files are still read. If the mapping file is deleted, jj commits remain, but automatic pi-entry-to-jj restore lookup is lost.
 - The extension uses jj commands under the hood; if a jj command fails due to conflicts or repository issues, resolve with jj and continue.
 - Existing Git repos are supported, but the extension's branch mirroring is jj-first.

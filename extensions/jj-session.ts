@@ -14,12 +14,20 @@ interface JjCheckpoint {
   commitId: string;
   description: string;
   timestamp: number;
+  named?: boolean;
+}
+
+interface CompactedCheckpoint {
+  entryId: string;
+  commitId: string;
+  description: string;
+  timestamp: number;
 }
 
 let checkpoints = new Map<string, JjCheckpoint>();
+let compactedCheckpoints = new Map<string, CompactedCheckpoint>();
 let jjEnabled = false;
 let autoRestore = true;
-let pendingContent: string | undefined;
 let lastStateId: string | undefined;
 
 const STATUS_KEY = "jj-session";
@@ -28,7 +36,8 @@ export default function (pi: ExtensionAPI) {
   const cwd = (ctx?: any) => ctx?.cwd ?? process.cwd();
 
   const settingsPathFor = (ctx?: any) => path.join(cwd(ctx), ".pi", "settings.json");
-  const checkpointsPathFor = (ctx?: any) => path.join(cwd(ctx), ".pi", "jj-session-checkpoints.json");
+  const legacyCheckpointsPathFor = (ctx?: any) => path.join(cwd(ctx), ".pi", "jj-session-checkpoints.json");
+  const checkpointsPathFor = (ctx?: any) => path.join(cwd(ctx), ".jj", "pi-session-checkpoints.json");
 
   try {
     const settingsPath = settingsPathFor();
@@ -68,10 +77,11 @@ export default function (pi: ExtensionAPI) {
 
   const loadCheckpoints = (ctx: any) => {
     try {
-      const file = checkpointsPathFor(ctx);
+      const file = fs.existsSync(checkpointsPathFor(ctx)) ? checkpointsPathFor(ctx) : legacyCheckpointsPathFor(ctx);
       if (!fs.existsSync(file)) return;
       const data = JSON.parse(fs.readFileSync(file, "utf8"));
       checkpoints = new Map(Object.entries(data.checkpoints ?? {}) as [string, JjCheckpoint][]);
+      compactedCheckpoints = new Map(Object.entries(data.compactedCheckpoints ?? {}) as [string, CompactedCheckpoint][]);
       lastStateId = data.lastStateId;
     } catch {
       // In-memory checkpoints still work if persistence cannot be read.
@@ -82,7 +92,11 @@ export default function (pi: ExtensionAPI) {
     try {
       const file = checkpointsPathFor(ctx);
       fs.mkdirSync(path.dirname(file), { recursive: true });
-      fs.writeFileSync(file, `${JSON.stringify({ lastStateId, checkpoints: Object.fromEntries(checkpoints) }, null, 2)}\n`);
+      fs.writeFileSync(file, `${JSON.stringify({
+        lastStateId,
+        checkpoints: Object.fromEntries(checkpoints),
+        compactedCheckpoints: Object.fromEntries(compactedCheckpoints),
+      }, null, 2)}\n`);
     } catch {
       // Non-fatal.
     }
@@ -101,7 +115,7 @@ export default function (pi: ExtensionAPI) {
     const { stdout, code } = await pi.exec("jj", ["status"], { cwd: cwd(ctx) });
     if (code !== 0) return false;
     const text = stdout.trim();
-    return !!text && !/working copy (is )?clean/i.test(text);
+    return !!text && !/(working copy (is )?clean|working copy has no changes)/i.test(text);
   };
 
   const currentChangeId = async (ctx: any) => {
@@ -118,6 +132,34 @@ export default function (pi: ExtensionAPI) {
     const stateId = lastStateId ?? changeId;
     const shortId = stateId?.slice(0, 8) ?? "unknown";
     setStatus(ctx, dirty ? `jj chg ${shortId} ±` : `jj chg ${shortId} ✓`, dirty ? "warning" : "accent");
+  };
+
+  const revisionExists = async (ctx: any, revision: string) => {
+    const { code } = await pi.exec("jj", ["log", "-r", revision, "--no-graph", "-T", "change_id.short()"], { cwd: cwd(ctx) });
+    return code === 0;
+  };
+
+  const markCheckpointMissing = (ctx: any, checkpoint: JjCheckpoint) => {
+    for (const [id, existing] of [...checkpoints.entries()]) {
+      if (existing.commitId === checkpoint.commitId) {
+        checkpoints.delete(id);
+        compactedCheckpoints.set(id, { ...existing });
+      }
+    }
+    saveCheckpoints(ctx);
+  };
+
+  const pruneMissingCheckpoints = async (ctx: any) => {
+    const unique = [...checkpoints.values()]
+      .filter((checkpoint, index, all) => all.findIndex((other) => other.commitId === checkpoint.commitId) === index);
+    let removed = 0;
+    for (const checkpoint of unique) {
+      if (!(await revisionExists(ctx, checkpoint.commitId))) {
+        markCheckpointMissing(ctx, checkpoint);
+        removed++;
+      }
+    }
+    return removed;
   };
 
   const commitChanges = async (ctx: any, message: string) => {
@@ -178,6 +220,11 @@ export default function (pi: ExtensionAPI) {
 
   const restoreCheckpoint = async (checkpoint: JjCheckpoint, ctx: any) => {
     if (!(await ensureJjRepo(ctx))) return;
+    if (!(await revisionExists(ctx, checkpoint.commitId))) {
+      markCheckpointMissing(ctx, checkpoint);
+      notify(ctx, `Cannot restore this checkpoint: jj chg ${checkpoint.commitId.slice(0, 8)} no longer exists`, "warning");
+      return;
+    }
     try {
       await pi.exec("jj", ["new", checkpoint.commitId], { cwd: cwd(ctx) });
       lastStateId = checkpoint.commitId;
@@ -204,6 +251,21 @@ export default function (pi: ExtensionAPI) {
       ?? [...checkpoints.values()].find((c) => c.entryId.startsWith(query) || c.commitId.startsWith(query));
   };
 
+  const findCompactedCheckpointForEntry = (ctx: any, entryId?: string): CompactedCheckpoint | undefined => {
+    loadCheckpoints(ctx);
+    if (entryId && compactedCheckpoints.has(entryId)) return compactedCheckpoints.get(entryId);
+
+    let cur = entryId;
+    const seen = new Set<string>();
+    while (cur && !seen.has(cur)) {
+      seen.add(cur);
+      const entry = ctx.sessionManager.getEntry?.(cur);
+      cur = entry?.parentId;
+      if (cur && compactedCheckpoints.has(cur)) return compactedCheckpoints.get(cur);
+    }
+    return undefined;
+  };
+
   const findCheckpointForEntry = (ctx: any, entryId?: string): JjCheckpoint | undefined => {
     loadCheckpoints(ctx);
     if (entryId && checkpoints.has(entryId)) return checkpoints.get(entryId);
@@ -225,6 +287,13 @@ export default function (pi: ExtensionAPI) {
     return undefined;
   };
 
+  const notifyCompactedIfNeeded = (ctx: any, entryId?: string) => {
+    const compacted = findCompactedCheckpointForEntry(ctx, entryId);
+    if (!compacted) return false;
+    notify(ctx, `Cannot restore this pi point: its JJ checkpoint was compacted (${compacted.commitId.slice(0, 8)})`, "warning");
+    return true;
+  };
+
   const parseDescribeArgs = (args?: string) => {
     const text = args?.trim() ?? "";
     if (!text) return { message: "" };
@@ -237,18 +306,31 @@ export default function (pi: ExtensionAPI) {
     return { message: text };
   };
 
+  const describeCheckpoint = async (ctx: any, checkpoint: JjCheckpoint, message: string) => {
+    if (!(await revisionExists(ctx, checkpoint.commitId))) {
+      markCheckpointMissing(ctx, checkpoint);
+      notify(ctx, `Cannot describe this checkpoint: jj chg ${checkpoint.commitId.slice(0, 8)} no longer exists`, "warning");
+      return false;
+    }
+    const result = await pi.exec("jj", ["describe", "-r", checkpoint.commitId, "-m", message], { cwd: cwd(ctx) });
+    if (result.code !== 0) {
+      notify(ctx, formatExecFailure("jj describe", result), "warning");
+      return false;
+    }
+
+    const updated = { ...checkpoint, description: message, named: true };
+    for (const [id, existing] of checkpoints.entries()) {
+      if (existing.commitId === checkpoint.commitId) checkpoints.set(id, { ...updated, entryId: id });
+    }
+    saveCheckpoints(ctx);
+    await refreshStatus(ctx);
+    notify(ctx, `Described jj chg ${checkpoint.commitId.slice(0, 8)}: ${message.slice(0, 60)}`, "success");
+    return true;
+  };
+
   pi.on("session_start", async (_event, ctx) => {
     loadCheckpoints(ctx);
     await refreshStatus(ctx);
-  });
-
-  pi.on("message_start", (event: any) => {
-    if (!jjEnabled || event.message?.role !== "user") return;
-    const content = event.message.content;
-    const text = Array.isArray(content)
-      ? content.map((c: any) => (c.type === "text" ? c.text : "")).join("\n")
-      : String(content ?? "");
-    pendingContent = text.trim().split("\n")[0].slice(0, 60);
   });
 
   pi.on("turn_end", async (_event, ctx) => {
@@ -256,8 +338,6 @@ export default function (pi: ExtensionAPI) {
       setStatus(ctx, "jj off", "dim");
       return;
     }
-    const content = pendingContent;
-    pendingContent = undefined;
 
     try {
       if (!(await ensureJjRepo(ctx))) return;
@@ -266,7 +346,7 @@ export default function (pi: ExtensionAPI) {
       const entryId = ctx.sessionManager.getLeafEntry()?.id;
       if (!entryId) return;
 
-      const description = content ? `pi session: ${content}` : `pi session: ${entryId.slice(0, 8)}`;
+      const description = `pi checkpoint ${entryId.slice(0, 8)}`;
       const commitId = await commitChanges(ctx, description);
       if (!commitId) return;
 
@@ -278,7 +358,7 @@ export default function (pi: ExtensionAPI) {
       if (userEntryId && userEntryId !== entryId) checkpoints.set(userEntryId, { ...checkpoint, entryId: userEntryId });
       saveCheckpoints(ctx);
 
-      notify(ctx, `JJ checkpoint chg ${commitId.slice(0, 8)}: ${description.replace(/^pi session: /, "").slice(0, 48)}`, "info");
+      notify(ctx, `JJ checkpoint chg ${commitId.slice(0, 8)}`, "info");
     } catch (err: any) {
       notify(ctx, `JJ checkpoint failed: ${err?.message ?? err}`, "warning");
     } finally {
@@ -290,12 +370,14 @@ export default function (pi: ExtensionAPI) {
     if (!jjEnabled || !autoRestore) return;
     const checkpoint = findCheckpointForEntry(ctx, event.newLeafId);
     if (checkpoint) await restoreCheckpoint(checkpoint, ctx);
+    else notifyCompactedIfNeeded(ctx, event.newLeafId);
   });
 
   pi.on("session_before_fork", async (event: any, ctx) => {
     if (!jjEnabled || !autoRestore) return;
     const checkpoint = findCheckpointForEntry(ctx, event.entryId);
     if (checkpoint) await restoreCheckpoint(checkpoint, ctx);
+    else notifyCompactedIfNeeded(ctx, event.entryId);
   });
 
   pi.registerCommand("jj-checkpoints", {
@@ -303,13 +385,28 @@ export default function (pi: ExtensionAPI) {
     handler: async (_args, ctx) => {
       if (!jjEnabled) return notify(ctx, "JJ Session extension is disabled", "info");
       loadCheckpoints(ctx);
+      if (await ensureJjRepo(ctx)) await pruneMissingCheckpoints(ctx);
       if (checkpoints.size === 0) return notify(ctx, "No JJ checkpoints yet", "info");
       const unique = [...checkpoints.values()]
         .sort((a, b) => a.timestamp - b.timestamp)
         .filter((checkpoint, index, all) => all.findIndex((other) => other.commitId === checkpoint.commitId) === index);
-      const rows = unique.map((c) => `${c.entryId.slice(0, 8)}  ${c.commitId.slice(0, 12)}  ${c.description}`);
-      console.log(`\n[JJ] Checkpoints (${rows.length})\n${rows.join("\n")}`);
-      notify(ctx, `Found ${rows.length} JJ checkpoint(s)`, "info");
+      const rows = unique.map((c) => `${c.named ? "★" : "·"} ${c.commitId.slice(0, 8)}  ${c.description}`);
+      if (ctx?.hasUI && ctx.ui.select) {
+        const selected = await ctx.ui.select(`JJ checkpoints (${rows.length})`, [...rows, "Close"]);
+        if (!selected || selected === "Close") return;
+        const index = rows.indexOf(selected);
+        const checkpoint = unique[index];
+        if (!checkpoint) return;
+        const action = await ctx.ui.select(`JJ ${checkpoint.commitId.slice(0, 8)}`, ["Describe", "Restore", "Close"]);
+        if (action === "Describe") {
+          const message = await ctx.ui.input?.("Describe checkpoint", checkpoint.named ? checkpoint.description : "");
+          if (message?.trim()) await describeCheckpoint(ctx, checkpoint, message.trim());
+        } else if (action === "Restore") {
+          await restoreCheckpoint(checkpoint, ctx);
+        }
+      } else {
+        notify(ctx, `Found ${rows.length} JJ checkpoint(s)`, "info");
+      }
     },
   });
 
@@ -328,21 +425,57 @@ export default function (pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       if (!jjEnabled) return notify(ctx, "JJ Session extension is disabled", "info");
       if (!(await ensureJjRepo(ctx))) return;
+      loadCheckpoints(ctx);
+      await pruneMissingCheckpoints(ctx);
       const { selector, message } = parseDescribeArgs(args);
       if (!message) return notify(ctx, "Usage: /jj-describe [-r entry-or-change] <message>", "info");
       const checkpoint = resolveCheckpoint(ctx, selector);
       if (!checkpoint) return notify(ctx, "No matching JJ checkpoint", "error");
 
-      const result = await pi.exec("jj", ["describe", "-r", checkpoint.commitId, "-m", message], { cwd: cwd(ctx) });
-      if (result.code !== 0) return notify(ctx, formatExecFailure("jj describe", result), "warning");
+      await describeCheckpoint(ctx, checkpoint, message);
+    },
+  });
 
-      const updated = { ...checkpoint, description: message };
-      for (const [id, existing] of checkpoints.entries()) {
-        if (existing.commitId === checkpoint.commitId) checkpoints.set(id, { ...updated, entryId: id });
+  pi.registerCommand("jj-compact", {
+    description: "Abandon unnamed checkpoint changes and keep only /jj-describe points",
+    handler: async (args, ctx) => {
+      if (!jjEnabled) return notify(ctx, "JJ Session extension is disabled", "info");
+      if (!(await ensureJjRepo(ctx))) return;
+      loadCheckpoints(ctx);
+
+      if (await hasChanges(ctx)) {
+        return notify(ctx, "Cannot compact while the jj working copy has uncheckpointed changes", "warning");
       }
+
+      const unique = [...checkpoints.values()]
+        .sort((a, b) => a.timestamp - b.timestamp)
+        .filter((checkpoint, index, all) => all.findIndex((other) => other.commitId === checkpoint.commitId) === index);
+      const keep = unique.filter((checkpoint) => checkpoint.named);
+      const discard = unique.filter((checkpoint) => !checkpoint.named);
+
+      if (keep.length === 0) return notify(ctx, "No named checkpoints yet. Use /jj-describe first.", "warning");
+      if (discard.length === 0) return notify(ctx, "No unnamed checkpoints to compact", "info");
+
+      const force = /(^|\s)--yes(\s|$)/.test(args ?? "");
+      if (!force && ctx?.hasUI && ctx.ui.confirm) {
+        const ok = await ctx.ui.confirm(
+          "Compact JJ checkpoints?",
+          `This keeps ${keep.length} named checkpoint(s), abandons ${discard.length} unnamed checkpoint change(s), and removes intermediate pi restore points.`
+        );
+        if (!ok) return notify(ctx, "Skipped JJ compact", "info");
+      }
+
+      const result = await pi.exec("jj", ["abandon", "--restore-descendants", ...discard.map((checkpoint) => checkpoint.commitId)], { cwd: cwd(ctx) });
+      if (result.code !== 0) return notify(ctx, formatExecFailure("jj compact", result), "warning");
+
+      for (const [id, checkpoint] of checkpoints.entries()) {
+        if (!checkpoint.named) compactedCheckpoints.set(id, { ...checkpoint });
+      }
+      checkpoints = new Map([...checkpoints.entries()].filter(([, checkpoint]) => checkpoint.named));
+      lastStateId = latestCheckpoint()?.commitId;
       saveCheckpoints(ctx);
       await refreshStatus(ctx);
-      notify(ctx, `Described jj chg ${checkpoint.commitId.slice(0, 8)}: ${message.slice(0, 60)}`, "success");
+      notify(ctx, `Compacted JJ checkpoints: kept ${keep.length}, removed ${discard.length}`, "success");
     },
   });
 
@@ -359,9 +492,11 @@ export default function (pi: ExtensionAPI) {
         if (!ok) return notify(ctx, "Kept JJ checkpoints", "info");
       }
       checkpoints.clear();
+      compactedCheckpoints.clear();
       lastStateId = undefined;
       try {
         fs.rmSync(checkpointsPathFor(ctx), { force: true });
+        fs.rmSync(legacyCheckpointsPathFor(ctx), { force: true });
       } catch {
         // Non-fatal.
       }
@@ -374,8 +509,12 @@ export default function (pi: ExtensionAPI) {
     description: "Restore files to the nearest checkpoint on the current session path",
     handler: async (_args, ctx) => {
       if (!jjEnabled) return notify(ctx, "JJ Session extension is disabled", "info");
-      const checkpoint = findCheckpointForEntry(ctx, ctx.sessionManager.getLeafEntry()?.id);
-      if (!checkpoint) return notify(ctx, "No JJ checkpoint on current session path", "warning");
+      const entryId = ctx.sessionManager.getLeafEntry()?.id;
+      const checkpoint = findCheckpointForEntry(ctx, entryId);
+      if (!checkpoint) {
+        if (notifyCompactedIfNeeded(ctx, entryId)) return;
+        return notify(ctx, "No JJ checkpoint on current session path", "warning");
+      }
       await restoreCheckpoint(checkpoint, ctx);
     },
   });
