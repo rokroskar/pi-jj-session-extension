@@ -1,5 +1,7 @@
 # Pi JJ Session Extension
 
+[![CI](https://github.com/rokroskar/pi-jj-session-extension/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/rokroskar/pi-jj-session-extension/actions/workflows/ci.yml?query=branch%3Amain)
+
 A pi extension that ties local file state to pi's branching session timeline using [Jujutsu](https://jj-vcs.github.io/jj/latest/) (`jj`).
 
 When enabled, the extension creates jj checkpoints after pi turns that change files. When you navigate the pi session tree or fork from an earlier point, it moves the jj working copy to a new branch from the matching checkpoint so file history follows conversation history.
