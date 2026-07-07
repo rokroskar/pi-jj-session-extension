@@ -242,6 +242,13 @@ test('source: checkpoints command renders through the UI, not raw console output
   excludes('console.log');
 });
 
+test('source: safety-checkpoints uncommitted changes before restore', () => {
+  includes('const checkpointUncommittedChanges = async (ctx: any, reason: string) =>');
+  includes('pi safety checkpoint: ${reason}');
+  includes('await checkpointUncommittedChanges(ctx, "before restore")');
+  includes('Saved uncheckpointed changes as jj chg');
+});
+
 test('source: warns when a pi point cannot restore because it was compacted', () => {
   includes('compactedCheckpoints = new Map');
   includes('const notifyCompactedIfNeeded = (ctx: any, entryId?: string) =>');
@@ -269,10 +276,17 @@ test('source: exposes safe cleanup commands for checkpoint history', () => {
   includes('fs.rmSync(legacyCheckpointsPathFor(ctx), { force: true })');
 });
 
+test('source: warns loudly when jj state diverges from pi state', () => {
+  includes('let lastDivergenceWarningKey: string | undefined');
+  includes('const isJjStateAligned = async (ctx: any, expected?: string) =>');
+  includes('setStatus(ctx, `jj ⚠ diverged from pi`, "warning")');
+  includes('JJ state diverged from pi history');
+});
+
 test('source: shows enabled status and current jj change id in the UI', () => {
   includes('const STATUS_KEY = "jj-session"');
   includes('ctx.ui.setStatus?.(STATUS_KEY, styled)');
-  includes('["log", "-r", "@", "--no-graph", "-T", "change_id.short()"]');
+  includes('const currentChangeId = (ctx: any) => changeIdFor(ctx, "@")');
   includes('if (!jjEnabled) return setStatus(ctx, "jj off", "dim")');
   includes('const stateId = lastStateId ?? changeId');
   includes('setStatus(ctx, dirty ? `jj chg ${shortId} ±` : `jj chg ${shortId} ✓`, dirty ? "warning" : "accent")');

@@ -15,6 +15,8 @@ When enabled, the extension creates jj checkpoints after pi turns that change fi
 - Mirrors pi branching with `jj new <checkpoint>`.
 - Shows a compact footer status: `jj off` when disabled, `jj chg abc12345 ✓` when enabled and clean, or `jj chg abc12345 ±` when the working copy has uncheckpointed changes.
 - Persists pi-entry-to-jj checkpoint mappings in `.jj/pi-session-checkpoints.json`, so tree restores survive `/reload` and pi restarts without dirtying the working copy.
+- Safety-checkpoints uncommitted working-copy changes before restoring another pi history point, so edits made outside pi are recoverable.
+- Warns loudly when jj is navigated outside pi and the current jj state no longer matches the current pi session point.
 
 ## Requirements
 
@@ -268,14 +270,15 @@ For each file-changing pi turn:
 When you navigate back in pi:
 
 1. The extension finds the nearest checkpoint for the selected session entry/path.
-2. It runs:
+2. If the current working copy has uncheckpointed changes, it first commits them as `pi safety checkpoint: before restore` so outside-pi edits are recoverable.
+3. It runs:
 
    ```bash
    jj new <checkpoint>
    ```
 
-3. The working copy now sits on a new child of that checkpoint.
-4. The next pi file-changing turn commits on that branch.
+4. The working copy now sits on a new child of that checkpoint.
+5. The next pi file-changing turn commits on that branch.
 
 So jj history can mirror pi's session tree:
 
@@ -286,6 +289,30 @@ pi:  A ─ B ─ C
 jj:  A ─ B ─ C
           └ D
 ```
+
+## Edits or jj navigation made outside pi
+
+If files are edited outside pi and then pi history is navigated with `/tree`, `/jj-restore`, or `/jj-sync`, the extension first creates a safety checkpoint:
+
+```text
+pi safety checkpoint: before restore
+```
+
+This prevents those external edits from being lost. They can be found later with:
+
+```bash
+jj log
+```
+
+and restored with normal jj commands if needed.
+
+If jj history is navigated outside pi, for example with `jj new`, `jj edit`, or another jj command, pi's current conversation point may no longer match the current file state. When this happens, the footer changes to:
+
+```text
+jj ⚠ diverged from pi
+```
+
+and the extension shows a warning explaining the expected pi checkpoint and current jj state. Use `/jj-sync` to restore files for the current pi point, `/tree` to select another conversation point manually, or navigate jj back manually. Pi does not currently expose a public extension API for moving the active session leaf to an arbitrary existing tree entry.
 
 ## Keeping history sane
 

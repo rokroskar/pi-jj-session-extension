@@ -29,6 +29,7 @@ let compactedCheckpoints = new Map<string, CompactedCheckpoint>();
 let jjEnabled = false;
 let autoRestore = true;
 let lastStateId: string | undefined;
+let lastDivergenceWarningKey: string | undefined;
 
 const STATUS_KEY = "jj-session";
 
@@ -118,16 +119,44 @@ export default function (pi: ExtensionAPI) {
     return !!text && !/(working copy (is )?clean|working copy has no changes)/i.test(text);
   };
 
-  const currentChangeId = async (ctx: any) => {
-    const { stdout, code } = await pi.exec("jj", ["log", "-r", "@", "--no-graph", "-T", "change_id.short()"], { cwd: cwd(ctx) });
+  const changeIdFor = async (ctx: any, rev: string) => {
+    const { stdout, code } = await pi.exec("jj", ["log", "-r", rev, "--no-graph", "-T", "change_id.short()"], { cwd: cwd(ctx) });
     if (code !== 0) return undefined;
     return stdout.trim().split(/\s+/)[0];
+  };
+
+  const currentChangeId = (ctx: any) => changeIdFor(ctx, "@");
+  const parentChangeId = (ctx: any) => changeIdFor(ctx, "@-");
+
+  const isJjStateAligned = async (ctx: any, expected?: string) => {
+    if (!expected) return true;
+    const [current, parent] = await Promise.all([currentChangeId(ctx), parentChangeId(ctx)]);
+    return current === expected || parent === expected;
+  };
+
+  const warnIfDiverged = async (ctx: any) => {
+    if (!jjEnabled || !lastStateId || !(await detectJj(ctx))) return false;
+    if (await isJjStateAligned(ctx, lastStateId)) return false;
+
+    const current = await currentChangeId(ctx);
+    const key = `${lastStateId}:${current ?? "unknown"}`;
+    setStatus(ctx, `jj ⚠ diverged from pi`, "warning");
+    if (key !== lastDivergenceWarningKey) {
+      lastDivergenceWarningKey = key;
+      notify(
+        ctx,
+        `JJ state diverged from pi history: pi expects ${lastStateId.slice(0, 8)}, jj is at ${(current ?? "unknown").slice(0, 8)}. Use /jj-sync to restore files for the current pi point, /tree to choose another pi point, or navigate jj manually.`,
+        "warning"
+      );
+    }
+    return true;
   };
 
   const refreshStatus = async (ctx: any) => {
     if (!ctx?.hasUI) return;
     if (!jjEnabled) return setStatus(ctx, "jj off", "dim");
     if (!(await detectJj(ctx))) return setStatus(ctx, "jj · not initialized", "warning");
+    if (await warnIfDiverged(ctx)) return;
     const [changeId, dirty] = await Promise.all([currentChangeId(ctx), hasChanges(ctx)]);
     const stateId = lastStateId ?? changeId;
     const shortId = stateId?.slice(0, 8) ?? "unknown";
@@ -218,6 +247,13 @@ export default function (pi: ExtensionAPI) {
     return ready;
   };
 
+  const checkpointUncommittedChanges = async (ctx: any, reason: string) => {
+    if (!(await hasChanges(ctx))) return undefined;
+    const commitId = await commitChanges(ctx, `pi safety checkpoint: ${reason}`);
+    if (commitId) notify(ctx, `Saved uncheckpointed changes as jj chg ${commitId.slice(0, 8)}`, "info");
+    return commitId;
+  };
+
   const restoreCheckpoint = async (checkpoint: JjCheckpoint, ctx: any) => {
     if (!(await ensureJjRepo(ctx))) return;
     if (!(await revisionExists(ctx, checkpoint.commitId))) {
@@ -226,6 +262,7 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     try {
+      await checkpointUncommittedChanges(ctx, "before restore");
       await pi.exec("jj", ["new", checkpoint.commitId], { cwd: cwd(ctx) });
       lastStateId = checkpoint.commitId;
       saveCheckpoints(ctx);
@@ -239,6 +276,20 @@ export default function (pi: ExtensionAPI) {
   const latestUserEntryId = (ctx: any): string | undefined => {
     const entries = ctx.sessionManager.getEntries?.() ?? [];
     return [...entries].reverse().find((e: any) => e?.type === "message" && e.message?.role === "user")?.id;
+  };
+
+  const bindCheckpointToCurrentPiPoint = (ctx: any, commitId: string, description: string) => {
+    const entryId = ctx.sessionManager.getLeafEntry()?.id;
+    if (!entryId) return false;
+
+    lastStateId = commitId;
+    const checkpoint = { entryId, commitId, description, timestamp: Date.now() };
+    checkpoints.set(entryId, checkpoint);
+
+    const userEntryId = latestUserEntryId(ctx);
+    if (userEntryId && userEntryId !== entryId) checkpoints.set(userEntryId, { ...checkpoint, entryId: userEntryId });
+    saveCheckpoints(ctx);
+    return true;
   };
 
   const latestCheckpoint = () => [...checkpoints.values()].sort((a, b) => b.timestamp - a.timestamp)[0];
@@ -350,13 +401,7 @@ export default function (pi: ExtensionAPI) {
       const commitId = await commitChanges(ctx, description);
       if (!commitId) return;
 
-      lastStateId = commitId;
-      const checkpoint = { entryId, commitId, description, timestamp: Date.now() };
-      checkpoints.set(entryId, checkpoint);
-
-      const userEntryId = latestUserEntryId(ctx);
-      if (userEntryId && userEntryId !== entryId) checkpoints.set(userEntryId, { ...checkpoint, entryId: userEntryId });
-      saveCheckpoints(ctx);
+      bindCheckpointToCurrentPiPoint(ctx, commitId, description);
 
       notify(ctx, `JJ checkpoint chg ${commitId.slice(0, 8)}`, "info");
     } catch (err: any) {
